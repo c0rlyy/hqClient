@@ -7,6 +7,8 @@ import (
 	"log"
 )
 
+// represent expected messae coming in from and coming to message broker
+// lenght does not need to be provided if NewMesasge() is used
 type Message struct {
 	Action  byte              // 2nd part of message 1 byte
 	Length  uint16            // 2 bytes, expected first value in the protocl
@@ -14,9 +16,13 @@ type Message struct {
 	Headers map[string]string // headers 3rd part of expected message seperated by \r\n, ends with \r\n\r\n
 }
 
-func NewMessage(length uint16, action byte, headers map[string]string, payload string) *Message {
+// TODO make this automaticly set the lenght of the message
+func NewMessage(action byte, headers map[string]string, payload string) *Message {
+	payloadLenght := uint16(len([]byte(payload)))
+	headersLenght := uint16(len(serializeHeaders(headers)))
+	fullLenght := 1 + 2 + payloadLenght + headersLenght
 	return &Message{
-		Length:  length,
+		Length:  fullLenght,
 		Action:  action,
 		Headers: headers,
 		Payload: payload,
@@ -32,19 +38,24 @@ func (msg *Message) SerializeMessage() []byte {
 	buff.Write(lengthBytes)
 	buff.Write([]byte{msg.Action})
 
-	for key, val := range msg.Headers {
-		var headerBuff bytes.Buffer
+	buff.Write(serializeHeaders(msg.Headers))
+	buff.Write([]byte("\r\n\r\n"))
+	buff.Write([]byte(msg.Payload))
+	return buff.Bytes()
+}
+
+func serializeHeaders(headers map[string]string) []byte {
+	var headerBuff bytes.Buffer
+	for key, val := range headers {
 		// Write Header: key:value\r\n
 		headerBuff.Write([]byte(key))
 		headerBuff.Write([]byte(":"))
 		headerBuff.Write([]byte(val))
 		headerBuff.Write([]byte("\r\n"))
 
-		buff.Write(headerBuff.Bytes())
 	}
-	buff.Write([]byte("\r\n\r\n"))
-	buff.Write([]byte(msg.Payload))
-	return buff.Bytes()
+	headerBuff.Write([]byte("\r\n\r\n"))
+	return headerBuff.Bytes()
 }
 
 // parsing messsage to FLEX protocl
@@ -54,8 +65,8 @@ func ParseMessage(payload []byte) (*Message, error) {
 	}
 	//length to int
 	// length := int(payload[0])<<8 | int(payload[1])
-	lenU16 := binary.BigEndian.Uint16(payload[:2])
-	length := uint16(lenU16)
+	// lenU16 := binary.BigEndian.Uint16(payload[:2])
+	// length := uint16(lenU16)
 
 	action := payload[2]
 	headersAndPayload := payload[3:]
@@ -69,8 +80,7 @@ func ParseMessage(payload []byte) (*Message, error) {
 	headers := parseHeaders(headersAndPayload[:headerEnd])
 	// this should work even if payload is not there
 	payloadData := string(headersAndPayload[headerEnd+4:]) // skiping the \r\n\r\n
-
-	return NewMessage(length, action, headers, payloadData), nil
+	return NewMessage(action, headers, payloadData), nil
 }
 
 // parseHeaders makes a map of string string values
