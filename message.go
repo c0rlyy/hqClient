@@ -10,8 +10,8 @@ import (
 // represent expected messae coming in from and coming to message broker
 // lenght does not need to be provided if NewMesasge() is used
 type Message struct {
-	Action  byte              // 2nd part of message 1 byte
-	Length  uint16            // 2 bytes, expected first value in the protocl
+	Action  byte              // 2nd part of message, 1 byte
+	Length  uint16            // 2 bytes, expected first values in the protocl
 	Payload string            // last part of the expected message, actual data to procces
 	Headers map[string]string // headers 3rd part of expected message seperated by \r\n, ends with \r\n\r\n
 }

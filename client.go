@@ -9,8 +9,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type topic = string
+
+// represents connection to broker and ques for topics
 type HqConnection struct {
-	WsConn *websocket.Conn
+	WsConn    *websocket.Conn
+	Queue     map[topic][]*Que
+	GlobalQue *Que
+	mu        sync.RWMutex
 }
 
 // Que struct representing the Que in the actuall message broker
@@ -30,14 +36,14 @@ type EventStream struct {
 	closed bool
 }
 
-const EventStreamBuffSize = 100
+const EventStreamBuffSize = 1000
 
 var Subscribe = byte(1)
 var Publish = byte(2)
 var Pop = byte(3)
 var Unsubscribe = byte(4)
-var Ping = byte(5)
-var Pong = byte(6)
+var Ping = byte(5) //TODO
+var Pong = byte(6) //TODO
 var Ack = byte(7)
 var Nack = byte(8)
 var Merror = byte(9)
@@ -45,6 +51,7 @@ var AddTopic = byte(10)
 var GlobalSub = byte(11)
 var DeleteTopic = byte(12)
 
+// retunrs a hq connection, and starts go routine that lisens to incoming WS messages grouping them to correct queue
 func NewHqConnection(brokerUrl string) (*HqConnection, error) {
 	u, err := url.Parse(brokerUrl)
 	if err != nil {
@@ -55,7 +62,11 @@ func NewHqConnection(brokerUrl string) (*HqConnection, error) {
 		return nil, err
 	}
 	log.Println("Connected to WebSocket server:", u.String())
-	return &HqConnection{WsConn: conn}, nil
+	hq := &HqConnection{WsConn: conn, Queue: make(map[topic][]*Que, 0)}
+
+	// starting go rutine to lisen to incoming messages from ws conn
+	go hq.lisenToMessages()
+	return hq, nil
 }
 
 func newQue(topic string) *Que {
@@ -73,12 +84,18 @@ func newEventStream(buffSize int) EventStream {
 	}
 }
 
+// TODO better error handling, with global sub
+// drops messages when channel is full, default size is 1000
 func (e *EventStream) notifyEvent(event Message) error {
 	if e.closed {
 		return errors.New("channel is closed")
 	}
-	e.msg <- event
-	return nil
+	select {
+	case e.msg <- event:
+		return nil
+	default:
+		return errors.New("channel is full, dopoing the message")
+	}
 }
 
 // return channel that lisins for incoming messages
@@ -101,73 +118,126 @@ func (q *Que) closeQue() {
 }
 
 // TODO
-func (q *Que) quePush() {
+// func (q *Que) quePush() {
+
+// }
+
+func (hq *HqConnection) closeAllQues() {
+	hq.mu.Lock()
+	defer hq.mu.Unlock()
+	for _, queue := range hq.Queue {
+		for _, que := range queue {
+			que.closeQue()
+		}
+	}
+	hq.GlobalQue.closeQue()
+}
+
+// TODO Maybe change this latter
+// func (hq *HqConnection) globalSubLisen() {
+// }
+
+// lisens to incoming messages trough ws conn, will stop if conneciton errors out
+func (hq *HqConnection) lisenToMessages() {
+	defer hq.closeAllQues()
+	// go hq.globalSubLisen()
+
+	for {
+		_, payload, err := hq.WsConn.ReadMessage()
+		if err != nil {
+			log.Println("Error reading WebSocket message:", err)
+			break
+		}
+
+		message, err := ParseMessage(payload)
+		if err != nil {
+			log.Println("Error parsing message:", err)
+			continue
+		}
+
+		topic, ok := message.Headers["topic"]
+		// sending message to global channel
+		hq.GlobalQue.EventStream.notifyEvent(*message)
+		// skipping if topic does not exits in the message
+		if !ok {
+			log.Println("message did not contain topic")
+			continue
+		}
+
+		queue, exists := hq.Queue[topic]
+		if !exists {
+			log.Printf("No queue for topic: %s", topic)
+			continue
+		}
+		// sends event to all ques for a given topic
+		for _, que := range queue {
+			err := que.EventStream.notifyEvent(*message)
+			if err != nil {
+				log.Println(err)
+			}
+		}
+	}
 }
 
 // wheanerv someting that topic == topic send back to what you return
 func (hq *HqConnection) Subscribe(topic string) (*Que, error) {
-	t := make(map[string]string)
-	t["topic"] = topic
-	msg := NewMessage(Subscribe, t, "").SerializeMessage()
-	err := hq.WsConn.WriteMessage(websocket.BinaryMessage, msg)
-	if err != nil {
+	header := map[string]string{
+		"topic": topic,
+	}
+	msg := NewMessage(Subscribe, header, "").SerializeMessage()
+	if err := hq.WsConn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
 		return nil, err
 	}
-	que := newQue(topic)
-	// TODO think whather this is the best place for this gorutine
-	go func(q *Que) {
-		defer q.closeQue()
-		for {
-			_, payload, err := hq.WsConn.ReadMessage()
-			if err != nil {
-				log.Println("Error reading WebSocket message:", err)
-				break
-			}
-
-			message, err := ParseMessage(payload)
-			if err != nil {
-				log.Println("Error parsing message:", err)
-				break
-			}
-
-			if q.Topic == message.Headers["topic"] {
-				if err := q.EventStream.notifyEvent(*message); err != nil {
-					log.Printf("error: sending to closed que %v", q.Topic)
-					break
-				}
-			}
-
-		}
-	}(que)
-	return que, nil
+	return newQue(topic), nil
 }
 
 func (hq *HqConnection) Publish(msg *Message) error {
 	if msg.Action != Publish {
 		return errors.New("message action type is not publish change that")
 	}
-	err := hq.WsConn.WriteMessage(websocket.BinaryMessage, msg.SerializeMessage())
-	return err
+	if _, ok := msg.Headers["topic"]; !ok {
+		return errors.New("message missing topic for publish action")
+	}
+	return hq.WsConn.WriteMessage(websocket.BinaryMessage, msg.SerializeMessage())
 }
 
-// TODO just topic here
+// TODO better errors,
 func (hq *HqConnection) AddTopic(topic string) error {
-	t := make(map[string]string)
-	t["topic"] = topic
-	msg := NewMessage(AddTopic, t, "").SerializeMessage()
-	err := hq.WsConn.WriteMessage(websocket.BinaryMessage, msg)
-	return err
+	header := map[string]string{
+		"topic": topic,
+	}
+	msg := NewMessage(AddTopic, header, "").SerializeMessage()
+	return hq.WsConn.WriteMessage(websocket.BinaryMessage, msg)
 }
 
-// TODO just topic should be here
+// add deleting ques
+func (hq *HqConnection) DeleteTopic(topic string) error {
+	hq.mu.Lock()
+	defer hq.mu.Unlock()
+
+	header := map[string]string{
+		"topic": topic,
+	}
+	msg := NewMessage(DeleteTopic, header, "").SerializeMessage()
+	for _, que := range hq.Queue[topic] {
+		que.closeQue()
+	}
+	delete(hq.Queue, topic)
+
+	return hq.WsConn.WriteMessage(websocket.BinaryMessage, msg)
+}
+
+// TODO better errors
 func (hq *HqConnection) PopMessage(topic string) error {
-	t := make(map[string]string)
-	t["topic"] = topic
-	msg := NewMessage(AddTopic, t, "").SerializeMessage()
-	err := hq.WsConn.WriteMessage(websocket.BinaryMessage, msg)
-	return err
+	header := map[string]string{
+		"topic": topic,
+	}
+	msg := NewMessage(Pop, header, "").SerializeMessage()
+	return hq.WsConn.WriteMessage(websocket.BinaryMessage, msg)
 }
 
+// TODO think bout global sub
+// returns a global subsciber for ALL incoming messages, error messages too
 func (hq *HqConnection) GlobalSubscibtion(msg *Message) (*Que, error) {
 	if msg.Action != GlobalSub {
 		return nil, errors.New("message action type is not global")
@@ -176,27 +246,5 @@ func (hq *HqConnection) GlobalSubscibtion(msg *Message) (*Que, error) {
 	if err != nil {
 		return nil, err
 	}
-	que := newQue("")
-	go func(q *Que) {
-		defer que.closeQue()
-		for {
-			_, payload, err := hq.WsConn.ReadMessage()
-			if err != nil {
-				log.Println("Error reading WebSocket message:", err)
-				break
-			}
-			message, err := ParseMessage(payload)
-			if err != nil {
-				log.Println("Error parsing message:", err)
-				break
-			}
-			if message.Action == GlobalSub {
-				if err := que.EventStream.notifyEvent(*message); err != nil {
-					log.Printf("channel was closed for %v topic", que.Topic)
-					break
-				}
-			}
-		}
-	}(que)
-	return que, err
+	return hq.GlobalQue, err
 }
