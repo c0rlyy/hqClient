@@ -13,10 +13,10 @@ type topic = string
 
 // represents connection to broker and ques for topics
 type HqConnection struct {
-	WsConn    *websocket.Conn
-	Queue     map[topic][]*Que
-	GlobalQue *Que
-	mu        sync.RWMutex
+	WsConn      *websocket.Conn  // connection to the mb
+	EventQueues map[topic][]*Que // Ques for a given topic BAD NAME subscibers is better
+	GlobalQue   *Que
+	mu          sync.RWMutex
 }
 
 // Que struct representing the Que in the actuall message broker
@@ -24,9 +24,6 @@ type HqConnection struct {
 // and groups them toghether to correct que
 type Que struct {
 	EventStream EventStream
-	Topic       string
-	Messages    []Message // not sure if i want this
-	mu          *sync.RWMutex
 }
 
 // Event stream is just a wrapper arround chan for nicer checking if chan is closed
@@ -73,7 +70,7 @@ func newQue(topic string) *Que {
 	return &Que{
 		EventStream: newEventStream(EventStreamBuffSize),
 		Topic:       topic,
-		Messages:    make([]Message, 0),
+		// Messages:    make([]Message, 0),
 	}
 }
 
